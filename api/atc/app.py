@@ -14,6 +14,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 from atc import db, moves, ordering, store
@@ -368,5 +369,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 before_id=body.before_id,
             ),
         )
+
+    # Mounted last, so every /api route above is matched first; html=True serves index.html at /.
+    if settings.static_dir is not None:
+        app.mount("/", StaticFiles(directory=settings.static_dir, html=True), name="web")
 
     return app
