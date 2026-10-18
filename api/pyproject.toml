@@ -12,6 +12,9 @@ dependencies = [
     "PyYAML>=6",
 ]
 
+[project.scripts]
+atc-import-projects = "atc.import_projects:main"
+
 [dependency-groups]
 dev = [
     "httpx2>=2.13.1",
