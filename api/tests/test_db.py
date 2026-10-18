@@ -3,8 +3,10 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 
 from atc import db
+from atc.app import create_app
 from atc.settings import Settings
 
 
@@ -185,3 +187,18 @@ def test_settings_defaults(monkeypatch):
     s = Settings.from_env()
     assert (s.workspace_slug, s.max_points, s.reconcile_seconds) == ("nakomis", 100, 300)
     assert s.plane_web_url == "https://plane.home.nakomis.com" and s.static_dir is None
+
+
+def test_static_dir_serves_the_web_app_after_the_api(pg_urls, tmp_path):
+    (tmp_path / "index.html").write_text("<!doctype html><title>ATC</title>")
+    (tmp_path / "app.js").write_text("console.log('atc')")
+    app = create_app(Settings(database_url=pg_urls["atc"], reconcile_seconds=0, static_dir=tmp_path))
+    with TestClient(app) as c:
+        index = c.get("/")
+        assert index.status_code == 200 and "<title>ATC</title>" in index.text
+        assert c.get("/app.js").text == "console.log('atc')"
+        assert c.get("/api/health").json()["ok"] is True  # the API still wins over the mount
+
+
+def test_no_static_dir_serves_nothing_at_root(client):
+    assert client.get("/").status_code == 404
