@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -14,15 +17,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 from atc import db, moves, ordering, store
+from atc import reconcile as reconciler
 from atc.board import build_board, priority_modules
-from atc.plane import read_plane
+from atc.plane import missing_columns, read_plane
 from atc.settings import Settings
-from atc.store import AlreadySet, load_rows
+from atc.store import MOVE_LOCK_KEY, AlreadySet, load_rows
 
 log = logging.getLogger(__name__)
-
-# Fixed for ever: concurrent drags queue on it, so each places against the board as the last left it.
-MOVE_LOCK_KEY = 0x41544301
 
 
 class MoveBody(BaseModel):
@@ -73,18 +74,56 @@ class ProjectMetaBody(BaseModel):
         return v
 
 
+@dataclass
+class ReconcileState:
+    """What the background reconcile last did; read by /api/health."""
+
+    last_ok: datetime | None = None  # when the last successful pass started
+    failed: bool = False  # the most recent attempt raised
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+
+    state = ReconcileState()
+
+    def reconcile_once(pool) -> None:
+        """One pass; a failure is logged and recorded, never raised."""
+        try:
+            with pool.connection() as conn:
+                result = reconciler.reconcile(conn, settings.workspace_slug)
+            state.last_ok, state.failed = result.at, False
+            if result.missing:
+                log.error("reconcile skipped: Plane columns not visible to atc: %s", result.missing)
+        except Exception:
+            state.failed = True
+            log.exception("reconcile failed")
+
+    def reconcile_loop(pool, stop: threading.Event) -> None:
+        while not stop.is_set():
+            reconcile_once(pool)
+            stop.wait(settings.reconcile_seconds)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         pool = db.open_pool(settings.database_url)
+        stop = threading.Event()
+        worker: threading.Thread | None = None
         try:
             version = db.migrate(pool)
             log.info("atc schema at version %s", version)
             app.state.pool = pool
+            # Once at start-up, then every reconcile_seconds; 0 turns the loop off (tests call it directly).
+            if settings.reconcile_seconds > 0:
+                worker = threading.Thread(
+                    target=reconcile_loop, args=(pool, stop), name="reconcile", daemon=True
+                )
+                worker.start()
             yield
         finally:
+            stop.set()
+            if worker is not None:
+                worker.join(timeout=30)
             pool.close()
 
     app = FastAPI(title="ATC", lifespan=lifespan)
@@ -92,15 +131,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health(request: Request) -> JSONResponse:
-        # Placeholder until Task 8: reports only whether the database answers.
         try:
             with request.app.state.pool.connection(timeout=5) as conn:
-                conn.execute("SELECT 1")
-            ok = True
+                missing = missing_columns(conn)
+                hidden = {
+                    "projects": conn.execute(
+                        "SELECT count(*) FROM atc.project WHERE hidden_at IS NOT NULL"
+                    ).fetchone()[0],
+                    "modules": conn.execute(
+                        "SELECT count(*) FROM atc.module WHERE hidden_at IS NOT NULL"
+                    ).fetchone()[0],
+                }
+            ok = not missing and not state.failed
         except Exception:
             log.exception("health check could not reach the database")
-            ok = False
-        body = {"ok": ok, "missing": [], "last_reconcile": None, "hidden": {"projects": 0, "modules": 0}}
+            ok, missing, hidden = False, [], {"projects": 0, "modules": 0}
+        body = {
+            "ok": ok,
+            "missing": missing,
+            "last_reconcile": state.last_ok.isoformat() if state.last_ok else None,
+            "hidden": hidden,
+        }
         return JSONResponse(body, status_code=200 if ok else 503)
 
     def link(ref: str) -> str:
@@ -185,7 +236,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 rows = load_rows(conn)
                 row = rows.projects.get(pid)
                 rank = None
-                if row is None or row.hidden_at is not None:  # rowless: keep its place in Backlog
+                if row is None:  # rowless: keep its place in Backlog
                     rank = moves.backlog_rank_in_place(conn, snap, rows, pid)
                 store.update_project_meta(conn, pid, rank=rank, **fields)
         return meta_of(request, str(pid))

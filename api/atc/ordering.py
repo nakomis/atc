@@ -72,8 +72,8 @@ def project_meta(board_projects, rows: AtcRows, project_id: UUID, columns: set[s
     """ProjectMeta for one project.
 
     One rule for every field: a hidden ATC row is no row. A missing or hidden row means Backlog with
-    default metadata (no repo, no deploys, BAU off), matching how the board treats it, so a project
-    that reappears in Plane never resurrects stale metadata.
+    default metadata (no repo, no deploys, BAU off), matching how the board treats it. Reads only:
+    reconcile (or a PUT) unhides the row, and then its old column and metadata return.
     """
     project = board_projects[project_id]
     row = rows.projects.get(project_id)

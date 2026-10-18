@@ -99,6 +99,9 @@ class PlaneFactory:
     def archive_project(self, project_id: UUID) -> None:
         self.conn.execute("UPDATE public.projects SET archived_at = now() WHERE id = %s", (project_id,))
 
+    def unarchive_project(self, project_id: UUID) -> None:
+        self.conn.execute("UPDATE public.projects SET archived_at = NULL WHERE id = %s", (project_id,))
+
     def delete_module(self, module_id: UUID) -> None:
         self.conn.execute("UPDATE public.modules SET deleted_at = now() WHERE id = %s", (module_id,))
 
