@@ -5,7 +5,15 @@ import httpx
 import pytest
 
 from atc.client import AtcHttp
-from atc.points_pass import PassResult, build_prompt, estimate_project, main, parse_estimates, run_claude
+from atc.points_pass import (
+    ClaudeLimitError,
+    PassResult,
+    build_prompt,
+    estimate_project,
+    main,
+    parse_estimates,
+    run_claude,
+)
 
 
 def _id(ref: str) -> str:
@@ -132,7 +140,7 @@ def test_main_defaults_to_projects_with_unestimated_items(fake_atc, monkeypatch,
     fake_atc.unestimated["HOME"] = [item("HOME-1")]
     fake_atc.unestimated["EMPTY"] = []
     monkeypatch.setattr("atc.points_pass.AtcHttp", lambda *a, **k: fake_atc.client)
-    monkeypatch.setattr("atc.points_pass.run_claude", lambda p: '{"HOME-1": 2}')
+    monkeypatch.setattr("atc.points_pass.run_claude", lambda p, model=None: '{"HOME-1": 2}')
     assert main([]) == 0
     out = capsys.readouterr().out
     assert "HOME: set" in out and "EMPTY" not in out
@@ -168,3 +176,93 @@ def test_run_claude_raises_on_error(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc("garbage", 1))
     with pytest.raises(RuntimeError):
         run_claude("p")
+
+
+def test_run_claude_is_locked_down(monkeypatch):
+    seen = {}
+
+    def fake(cmd, **kw):
+        seen.update(cmd=cmd, **kw)
+        return _Proc(json.dumps({"result": "ok"}))
+
+    monkeypatch.setattr("subprocess.run", fake)
+    run_claude("p")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5"
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert "--no-session-persistence" in cmd
+    assert seen["cwd"] != str(__import__("pathlib").Path.cwd())
+    run_claude("p", model="claude-haiku-5-5")
+    assert seen["cmd"][seen["cmd"].index("--model") + 1] == "claude-haiku-5-5"
+
+
+@pytest.mark.parametrize(
+    "out,code",
+    [
+        (json.dumps({"is_error": True, "result": "Claude usage limit reached"}), 1),
+        ("not json", 1),
+    ],
+)
+def test_run_claude_raises_limit_error(monkeypatch, out, code):
+    proc = _Proc(out, code)
+    proc.stderr = "5-hour usage limit reached"
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: proc)
+    with pytest.raises(ClaudeLimitError):
+        run_claude("p")
+
+
+def test_limit_error_stops_the_pass(fake_atc):
+    fake_atc.unestimated["HOME"] = [item(f"HOME-{n}") for n in range(1, 82)]
+    calls = []
+
+    def run(p):
+        calls.append(p)
+        raise ClaudeLimitError("usage limit")
+
+    with pytest.raises(ClaudeLimitError) as ei:
+        estimate_project(fake_atc.client, "HOME", run=run)
+    assert len(calls) == 1
+    assert len(ei.value.partial.unparsed) == 81
+
+
+def test_two_consecutive_failures_abort(fake_atc):
+    fake_atc.unestimated["HOME"] = [item(f"HOME-{n}") for n in range(1, 82)]
+    calls = []
+
+    def run(p):
+        calls.append(p)
+        raise RuntimeError("boom")
+
+    r = estimate_project(fake_atc.client, "HOME", run=run)
+    assert len(calls) == 2 and r.aborted and len(r.unparsed) == 81
+
+
+def test_main_exits_non_zero_on_limit(fake_atc, monkeypatch, capsys):
+    fake_atc.unestimated["HOME"] = [item("HOME-1")]
+    monkeypatch.setattr("atc.points_pass.AtcHttp", lambda *a, **k: fake_atc.client)
+
+    def boom(p, model="x"):
+        raise ClaudeLimitError("usage limit")
+
+    monkeypatch.setattr("atc.points_pass.run_claude", boom)
+    assert main([]) == 2
+    out = capsys.readouterr().out
+    assert "usage limit reached" in out and "total:" in out
+
+
+def test_main_exits_non_zero_on_abort(fake_atc, monkeypatch, capsys):
+    fake_atc.unestimated["HOME"] = [item("HOME-1")]
+    monkeypatch.setattr("atc.points_pass.AtcHttp", lambda *a, **k: fake_atc.client)
+    monkeypatch.setattr("atc.points_pass.estimate_project", lambda *a, **k: PassResult(aborted=True))
+    assert main(["--project", "HOME"]) == 1
+
+
+def test_description_truncated_to_4000():
+    p = build_prompt("HOME", [item("HOME-1") | {"description": "x" * 5000}], 100)
+    assert "x" * 4000 in p and "x" * 4001 not in p
+
+
+def test_real_claude_is_blocked_in_tests(fake_atc):
+    fake_atc.unestimated["HOME"] = [item("HOME-1")]
+    with pytest.raises(AssertionError, match="real claude CLI"):
+        estimate_project(fake_atc.client, "HOME")  # default runner must never reach claude
