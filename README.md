@@ -18,6 +18,7 @@ If you find this useful, please consider buying me a coffee:
 - [API](#api)
   * [Reconcile and health](#reconcile-and-health)
 - [Points pass](#points-pass)
+- [Container image](#container-image)
 - [Architecture Diagram](#architecture-diagram)
 - [Repository Layout](#repository-layout)
 - [Architecture Diagrams](#architecture-diagrams)
@@ -55,7 +56,27 @@ A reconcile pass runs at start-up and then every `ATC_RECONCILE_SECONDS` (defaul
 
 ## Points pass
 
-`uv --directory api run atc-points-pass [--project IDENT]... [--dry-run]` runs one `claude -p` session (Martin's Max login) per batch of 40 open, unestimated tickets in each project, and writes the answers through the API with source `claude-estimate` and `if_unestimated`, so a number already set is never overwritten (a 409 counts as skipped). Ticket text goes into the prompt as nonce-delimited, untrusted data. `--atc-url`, `--cert` and `--key` default to `https://atc.plane.home.nakomis.com` and `~/.config/nakomis/client.{crt,key}`. Re-run it any time for new unestimated items; try `--dry-run` on one small project first.
+`uv --directory api run atc-points-pass [--project IDENT]... [--dry-run] [--model M]` runs one `claude -p` session (Martin's Max login) per batch of 40 open, unestimated tickets in each project, and writes the answers through the API with source `claude-estimate` and `if_unestimated`, so a number already set is never overwritten (a 409 counts as skipped). Sessions run locked down (no tools, no saved session, neutral temp directory) on `--model` (default `claude-opus-5-5`); a usage limit stops the pass with a non-zero exit, as do two consecutive session failures. Ticket text goes into the prompt as nonce-delimited, untrusted data. `--atc-url`, `--cert` and `--key` default to `https://atc.plane.home.nakomis.com` and `~/.config/nakomis/client.{crt,key}`. Re-run it any time for new unestimated items; try `--dry-run` on one small project first.
+
+## Container image
+
+One image serves the API and the built board (`container/Dockerfile`: pnpm builds `web/dist`, uv installs `api`, the result runs as a non-root user on port 8000 with `ATC_STATIC_DIR=/app/static`). It is linux/amd64, for Mace.
+
+```bash
+docker build --platform linux/amd64 --provenance=false --sbom=false -f container/Dockerfile -t atc:local .
+docker run --rm -e ATC_DATABASE_URL=postgresql://atc:...@host:5432/plane -p 8000:8000 atc:local
+```
+
+CI builds the image on every pull request (not pushed). On a push to `main` it publishes `registry.home.nakomis.com/nakomis/atc:<version>-<sha7>`, where `<version>` is `api/pyproject.toml`'s `version`; the patch is bumped while that tag already exists, because the repository is `ALLOW_ONCE`. The job fails with a clear error if a secret is missing. It needs four repository secrets (the same values home-infra uses; see `docs/runbooks/nexus.md` there, "Publishing from CI"):
+
+| Secret | Content |
+|--------|---------|
+| `NEXUS_DOCKER_USER` | Nexus user allowed to push to `registry.home.nakomis.com` |
+| `NEXUS_DOCKER_PASSWORD` | That user's password |
+| `NEXUS_CLIENT_CERT` | Home mTLS client certificate (PEM) |
+| `NEXUS_CLIENT_KEY` | Its private key (PEM) |
+
+The container exits if the database is unreachable at start-up (the schema migration waits 30 seconds for a connection), so run it with a restart policy.
 
 ## Architecture Diagram
 
