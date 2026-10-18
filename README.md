@@ -15,6 +15,8 @@ If you find this useful, please consider buying me a coffee:
 <!-- toc -->
 
 - [What it is](#what-it-is)
+- [API](#api)
+  * [Reconcile and health](#reconcile-and-health)
 - [Architecture Diagram](#architecture-diagram)
 - [Repository Layout](#repository-layout)
 - [Architecture Diagrams](#architecture-diagrams)
@@ -27,6 +29,28 @@ If you find this useful, please consider buying me a coffee:
 A board at `atc.plane.home.nakomis.com`: three manually ordered columns of project and module cards, every open work item sized in story points (1 point is about one day of Martin's own work), with column and card totals. The Plane MCP and BAU read it through an HTTP API. Project metadata Plane cannot store (repo, deploys, deploy action, BAU enabled) lives here too.
 
 The full design is in [docs/superpowers/specs/2026-10-18-atc-design.md](docs/superpowers/specs/2026-10-18-atc-design.md).
+
+## API
+
+All JSON; ATC adds no auth of its own (Leia's mTLS is the gate).
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/board[?all=true]` | Columns of cards, with points and totals |
+| `POST /api/move` | Move a project or module card (`kind`, `id`, `to_column`, `before_id?`) |
+| `POST /api/reorder` | Reorder a module within its project card |
+| `GET /api/next` | The next item to work on, with up to two runners-up |
+| `GET /api/priority` | Every open item ref, in priority order |
+| `GET /api/projects[?bau_enabled=true]`, `GET`/`PUT /api/projects/{uuid\|IDENT}` | Project metadata (repo, deploys, deploy action, BAU enabled) |
+| `GET`/`PUT /api/work-items/{uuid}/points` | Story points (`if_unestimated` never overwrites) |
+| `GET /api/work-items?unestimated=true[&project=IDENT]` | Open items still without points |
+| `GET /api/health` | `{ok, missing, last_reconcile, hidden}`; HTTP 503 when not ok |
+
+### Reconcile and health
+
+A reconcile pass runs at start-up and then every `ATC_RECONCILE_SECONDS` (default 300; `0` turns the loop off). It gives new Plane projects, their Unsorted groups and new modules a row at the bottom of Backlog, hides ATC rows whose Plane project or module is deleted or archived, and unhides them when they return. It never deletes rows, never moves an existing row, and takes the same advisory lock as moves. A failed pass is logged and makes `/api/health` report 503 until the next one succeeds.
+
+`/api/health` is 503 when the database is unreachable, when the `atc` role cannot see a Plane column ATC reads (`missing` lists each as `table.column`; the reconcile writes nothing meanwhile), or when the last reconcile failed. `hidden` counts the ATC rows currently hidden.
 
 ## Architecture Diagram
 

@@ -10,6 +10,10 @@ import psycopg
 
 from atc import ranks
 
+# Fixed for ever: moves, metadata and points writes and the reconcile queue on it, so each places
+# against the board as the last left it and a hide cannot race an upsert.
+MOVE_LOCK_KEY = 0x41544301
+
 
 @dataclass(frozen=True)
 class ColumnDef:
@@ -148,7 +152,8 @@ def set_points(
     return PointsRow(*row)
 
 
-def _backlog_bottom_rank(conn: psycopg.Connection) -> str:
+def backlog_max_rank(conn: psycopg.Connection) -> str | None:
+    """The highest rank among visible Backlog cards (projects and module cards), if any."""
     row = conn.execute(
         "SELECT max(r) FROM ("
         " SELECT rank AS r FROM atc.project WHERE column_key = 'backlog' AND hidden_at IS NULL"
@@ -156,7 +161,11 @@ def _backlog_bottom_rank(conn: psycopg.Connection) -> str:
         " SELECT column_rank FROM atc.module WHERE column_key = 'backlog' AND hidden_at IS NULL"
         ") ranked"
     ).fetchone()
-    return ranks.after(row[0])
+    return row[0]
+
+
+def _backlog_bottom_rank(conn: psycopg.Connection) -> str:
+    return ranks.after(backlog_max_rank(conn))
 
 
 def update_project_meta(
