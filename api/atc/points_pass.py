@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     for ident in idents:
         if not args.project and not atc.get("/api/work-items", project=ident, unestimated="true"):
             continue
-        r = estimate_project(atc, ident, dry_run=args.dry_run, log=print)
+        r = estimate_project(atc, ident, run=run_claude, dry_run=args.dry_run, log=print)
         print(f"{ident}: set {r.set}, already set {r.skipped_already_set}, unparsed {len(r.unparsed)}")
         if r.unparsed:
             print(f"  unparsed: {', '.join(r.unparsed)}")
