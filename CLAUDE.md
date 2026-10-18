@@ -7,7 +7,7 @@ Air Traffic Control for Plane: a board that arranges Plane projects and modules 
 - **API:** Python 3.12, FastAPI, managed with `uv` (`uv sync`, `uv run pytest`, `uv run ruff check .`).
 - **Web:** React, Vite, Tailwind 4, Biome, Vitest, pnpm (pinned via `packageManager`; never npm lockfiles, see Martin's start-claude-project notes on the Nexus proxy).
 - **Data:** Postgres schema `atc` in Plane's own `plane` database on Luke (`plane-db`), backed up with Plane by its nightly `pg_dump`.
-- **Delivery:** one container (API serving the built web app) built by CI and pushed to `docker.home.nakomis.com`; deployed to Mace by home-infra Ansible. Leia proxies `atc.plane.home.nakomis.com` with mTLS.
+- **Delivery:** one container (API serving the built web app) built by CI and pushed to `registry.home.nakomis.com` (the hosted Nexus repository; `docker.home.nakomis.com` is a pull-only Docker Hub proxy and a push there 404s) as `nakomis/atc:<version>-<sha7>`; deployed to Mace by home-infra Ansible. Leia proxies `atc.plane.home.nakomis.com` with mTLS.
 - Coverage minimum 70%. British English. No attribution lines in commits.
 
 ## Key decisions

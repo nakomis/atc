@@ -56,10 +56,100 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+  # Container image (ATC-4). Builds on every PR (not pushed); on a push to main it
+  # is published to the hosted Nexus repository, registry.home.nakomis.com
+  # (ALLOW_ONCE: a tag is never reused). Plain `docker build` + `docker push`,
+  # because only the daemon reads /etc/docker/certs.d. --provenance/--sbom=false:
+  # Nexus wants a plain schema2 manifest, not an attestation index.
+  image:
+    name: Container image
+    needs: [python, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      REGISTRY: registry.home.nakomis.com
+      IMAGE: nakomis/atc
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+      # Fail before building anything if a secret is missing: an unset secret
+      # expands to an empty string, which would otherwise surface as a
+      # baffling TLS or login error halfway through.
+      - name: Check the publishing secrets are set
+        if: env.PUBLISH == 'true'
+        env:
+          NEXUS_DOCKER_USER: ${{ secrets.NEXUS_DOCKER_USER }}
+          NEXUS_DOCKER_PASSWORD: ${{ secrets.NEXUS_DOCKER_PASSWORD }}
+          NEXUS_CLIENT_CERT: ${{ secrets.NEXUS_CLIENT_CERT }}
+          NEXUS_CLIENT_KEY: ${{ secrets.NEXUS_CLIENT_KEY }}
+        run: |
+          missing=0
+          for s in NEXUS_DOCKER_USER NEXUS_DOCKER_PASSWORD NEXUS_CLIENT_CERT NEXUS_CLIENT_KEY; do
+            if [ -z "${!s}" ]; then
+              echo "::error::repository secret $s is not set; add the four NEXUS_* secrets (see the README, 'Container image')"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Present the home client cert to the registry
+        if: env.PUBLISH == 'true'
+        env:
+          NEXUS_CLIENT_CERT: ${{ secrets.NEXUS_CLIENT_CERT }}
+          NEXUS_CLIENT_KEY: ${{ secrets.NEXUS_CLIENT_KEY }}
+        run: |
+          d=/etc/docker/certs.d/$REGISTRY
+          sudo install -d -m 0755 "$d"
+          printf '%s\n' "$NEXUS_CLIENT_CERT" | sudo tee "$d/client.cert" > /dev/null
+          printf '%s\n' "$NEXUS_CLIENT_KEY" | sudo install -m 0600 /dev/stdin "$d/client.key"
+      - name: Log in to Nexus
+        if: env.PUBLISH == 'true'
+        env:
+          NEXUS_DOCKER_USER: ${{ secrets.NEXUS_DOCKER_USER }}
+          NEXUS_DOCKER_PASSWORD: ${{ secrets.NEXUS_DOCKER_PASSWORD }}
+        run: printf '%s' "$NEXUS_DOCKER_PASSWORD" | docker login "$REGISTRY" -u "$NEXUS_DOCKER_USER" --password-stdin
+      # <version>-<sha7>, version from api/pyproject.toml. A tag is never reused
+      # (ALLOW_ONCE): if a re-run finds the tag already pushed, bump the patch
+      # until it is free.
+      - name: Choose the tag
+        id: tag
+        run: |
+          sha=${GITHUB_SHA::7}
+          if [ "$PUBLISH" != true ]; then
+            echo "ref=$IMAGE:ci-$sha" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          v=$(sed -n 's/^version *= *"\(.*\)"/\1/p' api/pyproject.toml | head -1)
+          [ -n "$v" ] || { echo "::error::no version in api/pyproject.toml"; exit 1; }
+          start=$v
+          while docker manifest inspect "$REGISTRY/$IMAGE:$v-$sha" > /dev/null 2>&1; do
+            IFS=. read -r a b c <<< "$v"; v="$a.$b.$((c + 1))"
+          done
+          [ "$v" = "$start" ] || echo "::notice::$IMAGE:$start-$sha already exists; using $v-$sha"
+          echo "ref=$REGISTRY/$IMAGE:$v-$sha" >> "$GITHUB_OUTPUT"
+      - name: Build
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+        run: |
+          docker build --platform linux/amd64 \
+            --provenance=false --sbom=false \
+            -f container/Dockerfile -t "$REF" .
+      - name: Push
+        if: env.PUBLISH == 'true'
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+        run: |
+          docker push "$REF"
+          echo "Published \`$REF\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Log out of Nexus
+        if: always() && env.PUBLISH == 'true'
+        run: docker logout "$REGISTRY" || true
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
-    needs: [python, web]
+    needs: [python, web, image]
     if: always()
     steps:
-      - run: test "${{ needs.python.result }}" = "success" && test "${{ needs.web.result }}" = "success"
+      - run: test "${{ needs.python.result }}" = "success" && test "${{ needs.web.result }}" = "success" && test "${{ needs.image.result }}" = "success"
