@@ -17,6 +17,7 @@ If you find this useful, please consider buying me a coffee:
 - [What it is](#what-it-is)
 - [API](#api)
   * [Reconcile and health](#reconcile-and-health)
+- [Container image](#container-image)
 - [Architecture Diagram](#architecture-diagram)
 - [Repository Layout](#repository-layout)
 - [Architecture Diagrams](#architecture-diagrams)
@@ -51,6 +52,26 @@ All JSON; ATC adds no auth of its own (Leia's mTLS is the gate).
 A reconcile pass runs at start-up and then every `ATC_RECONCILE_SECONDS` (default 300; `0` turns the loop off). It gives new Plane projects, their Unsorted groups and new modules a row at the bottom of Backlog, hides ATC rows whose Plane project or module is deleted or archived, and unhides them when they return. It never deletes rows, never moves an existing row, and takes the same advisory lock as moves. A failed pass is logged and makes `/api/health` report 503 until the next one succeeds.
 
 `/api/health` is 503 when the database is unreachable, when the `atc` role cannot see a Plane column ATC reads (`missing` lists each as `table.column`; the reconcile writes nothing meanwhile), or when the last reconcile failed. `hidden` counts the ATC rows currently hidden.
+
+## Container image
+
+One image serves the API and the built board (`container/Dockerfile`: pnpm builds `web/dist`, uv installs `api`, the result runs as a non-root user on port 8000 with `ATC_STATIC_DIR=/app/static`). It is linux/amd64, for Mace.
+
+```bash
+docker build --platform linux/amd64 --provenance=false --sbom=false -f container/Dockerfile -t atc:local .
+docker run --rm -e ATC_DATABASE_URL=postgresql://atc:...@host:5432/plane -p 8000:8000 atc:local
+```
+
+CI builds the image on every pull request (not pushed). On a push to `main` it publishes `registry.home.nakomis.com/nakomis/atc:<version>-<sha7>`, where `<version>` is `api/pyproject.toml`'s `version`; the patch is bumped while that tag already exists, because the repository is `ALLOW_ONCE`. The job fails with a clear error if a secret is missing. It needs four repository secrets (the same values home-infra uses; see `docs/runbooks/nexus.md` there, "Publishing from CI"):
+
+| Secret | Content |
+|--------|---------|
+| `NEXUS_DOCKER_USER` | Nexus user allowed to push to `registry.home.nakomis.com` |
+| `NEXUS_DOCKER_PASSWORD` | That user's password |
+| `NEXUS_CLIENT_CERT` | Home mTLS client certificate (PEM) |
+| `NEXUS_CLIENT_KEY` | Its private key (PEM) |
+
+The container exits if the database is unreachable at start-up (the schema migration waits 30 seconds for a connection), so run it with a restart policy.
 
 ## Architecture Diagram
 
