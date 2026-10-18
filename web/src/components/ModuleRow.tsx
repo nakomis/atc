@@ -74,7 +74,12 @@ export function ModuleRow({ module, card, column, index }: Props) {
         <MoveMenu label={name} options={options} />
       </div>
       {open && (
-        <TicketList module={module} maxPoints={actions.maxPoints} onSaved={actions.onPointsSaved} />
+        <TicketList
+          module={module}
+          maxPoints={actions.maxPoints}
+          onSaved={actions.onPointsSaved}
+          onFailed={actions.onPointsSaved}
+        />
       )}
     </li>
   );

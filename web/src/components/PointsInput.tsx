@@ -6,11 +6,16 @@ interface Props {
   item: ItemView;
   maxPoints: number;
   onSaved: () => void;
+  /** A refused save: the board may have moved on (item deleted, archived), so reload it. */
+  onFailed: () => void;
   onError: (message: string | null) => void;
 }
 
-/** Inline points editor: saves on Enter or on leaving the field, always as Martin's number. */
-export function PointsInput({ item, maxPoints, onSaved, onError }: Props) {
+/**
+ * Inline points editor: saves on Enter or on leaving the field, always as Martin's number.
+ * Keyed on the item's points by its parent, so a reloaded board with a new number remounts it.
+ */
+export function PointsInput({ item, maxPoints, onSaved, onFailed, onError }: Props) {
   const original = item.points === null ? '' : String(item.points);
   const [value, setValue] = useState(original);
   const [saved, setSaved] = useState(original);
@@ -34,7 +39,9 @@ export function PointsInput({ item, maxPoints, onSaved, onError }: Props) {
       onSaved();
     } catch (e) {
       setSaved(before);
+      setValue(before);
       onError(e instanceof Error ? e.message : String(e));
+      onFailed();
     }
   };
 

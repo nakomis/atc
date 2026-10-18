@@ -65,6 +65,33 @@ describe('TicketList', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('no work item home-1');
   });
 
+  test('a refused save puts the old value back, asks for a reload and does not resend on blur', async () => {
+    const fetchMock = mockApi({
+      'PUT /api/work-items/home-1/points': () => respond({ detail: 'no work item home-1' }, 404),
+    });
+    const onFailed = vi.fn();
+    const user = userEvent.setup();
+    render(<TicketList module={moduleWithTwoItems} onFailed={onFailed} />);
+    const input = screen.getByLabelText('Points for HOME-1');
+    await user.clear(input);
+    await user.type(input, '9{Enter}');
+    await screen.findByRole('alert');
+    expect(input).toHaveValue(3);
+    expect(onFailed).toHaveBeenCalled();
+    await user.tab();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a reload with a different number shows it', () => {
+    const { rerender } = render(<TicketList module={moduleWithTwoItems} />);
+    const changed = {
+      ...moduleWithTwoItems,
+      items: moduleWithTwoItems.items.map((i) => (i.ref === 'HOME-1' ? { ...i, points: 8 } : i)),
+    };
+    rerender(<TicketList module={changed} />);
+    expect(screen.getByLabelText('Points for HOME-1')).toHaveValue(8);
+  });
+
   test('an empty module says so', () => {
     render(<TicketList module={{ ...moduleWithTwoItems, items: [] }} />);
     expect(screen.getByText('No open tickets.')).toBeInTheDocument();

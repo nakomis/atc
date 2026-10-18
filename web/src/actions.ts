@@ -6,6 +6,7 @@ export interface BoardActions {
   maxPoints: number;
   onMove: (req: MoveRequest) => void;
   onReorder: (req: ReorderRequest) => void;
+  /** Reload after a points write, saved or refused, so totals and tickets match the API. */
   onPointsSaved: () => void;
   onSettings: (projectId: string) => void;
 }

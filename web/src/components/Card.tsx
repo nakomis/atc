@@ -121,6 +121,7 @@ export function Card({ card, column, index }: Props) {
           module={card.modules[0]}
           maxPoints={actions.maxPoints}
           onSaved={actions.onPointsSaved}
+          onFailed={actions.onPointsSaved}
         />
       )}
     </article>

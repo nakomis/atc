@@ -197,6 +197,22 @@ describe('board', () => {
     await waitFor(() => expect(boardCalls(fetchMock)).toHaveLength(2));
   });
 
+  test('a refused points save shows the message and reloads the board', async () => {
+    const fetchMock = mockApi({
+      'GET /api/board': makeBoard(),
+      'PUT /api/work-items/home-1/points': () => respond({ detail: 'no work item home-1' }, 404),
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'M1' }));
+    const input = screen.getByLabelText('Points for HOME-1');
+    await user.clear(input);
+    await user.type(input, '9{Enter}');
+    expect(await screen.findByRole('alert')).toHaveTextContent('no work item home-1');
+    await waitFor(() => expect(boardCalls(fetchMock)).toEqual(['/api/board', '/api/board']));
+    expect(screen.getByLabelText('Points for HOME-1')).toHaveValue(3);
+  });
+
   test('the gear on a project card opens its settings', async () => {
     mockApi({ 'GET /api/board': makeBoard(), 'GET /api/projects/p1': homeMeta });
     const user = userEvent.setup();

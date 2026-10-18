@@ -6,10 +6,16 @@ interface Props {
   module: ModuleView;
   maxPoints?: number;
   onSaved?: () => void;
+  onFailed?: () => void;
 }
 
 /** A module's open tickets in Plane order, each linking to Plane, with inline points. */
-export function TicketList({ module, maxPoints = 100, onSaved = () => {} }: Props) {
+export function TicketList({
+  module,
+  maxPoints = 100,
+  onSaved = () => {},
+  onFailed = () => {},
+}: Props) {
   const [error, setError] = useState<string | null>(null);
   if (module.items.length === 0) {
     return <p className="py-1 pl-6 text-xs text-neutral-500">No open tickets.</p>;
@@ -35,7 +41,14 @@ export function TicketList({ module, maxPoints = 100, onSaved = () => {} }: Prop
             <span className="min-w-0 flex-1 truncate" title={item.name}>
               {item.name}
             </span>
-            <PointsInput item={item} maxPoints={maxPoints} onSaved={onSaved} onError={setError} />
+            <PointsInput
+              key={`${item.id}:${item.points}`}
+              item={item}
+              maxPoints={maxPoints}
+              onSaved={onSaved}
+              onFailed={onFailed}
+              onError={setError}
+            />
           </li>
         ))}
       </ul>
