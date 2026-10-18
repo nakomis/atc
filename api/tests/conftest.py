@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -21,8 +22,18 @@ from atc.settings import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 POSTGRES_IMAGE = "postgres:15.19-alpine"
-# Matches tests/fixtures/grants.sql.
-ATC_PASSWORD = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+
+def _grants_password() -> str:
+    """The atc test password, read from grants.sql so the two cannot drift."""
+    sql = (FIXTURES / "grants.sql").read_text()
+    match = re.search(r"ALTER ROLE atc WITH LOGIN PASSWORD '([0-9a-f]{64})'", sql)
+    if match is None:
+        raise RuntimeError("tests/fixtures/grants.sql must set a 64-hex password for atc")
+    return match.group(1)
+
+
+ATC_PASSWORD = _grants_password()
 # The rows ATC writes; column_def and schema_version are migration data and survive.
 ATC_DATA_TABLES = ("atc.project", "atc.module", "atc.work_item")
 
@@ -37,10 +48,31 @@ def pg_urls() -> Iterator[dict[str, str]]:
             "admin": f"postgresql://plane:plane@{host}:{port}/plane",
             "atc": f"postgresql://atc:{ATC_PASSWORD}@{host}:{port}/plane",
         }
-        with psycopg.connect(urls["admin"], autocommit=True) as conn:
-            conn.execute((FIXTURES / "plane_schema.sql").read_text())
-            conn.execute((FIXTURES / "grants.sql").read_text())
+        apply_plane_fixtures(urls["admin"])
         yield urls
+
+
+def apply_plane_fixtures(admin_url: str) -> None:
+    """Create Plane's tables and the atc role, schema and grants in the database at `admin_url`."""
+    with psycopg.connect(admin_url, autocommit=True) as conn:
+        conn.execute((FIXTURES / "plane_schema.sql").read_text())
+        conn.execute((FIXTURES / "grants.sql").read_text())
+
+
+@pytest.fixture
+def fresh_db(pg_urls: dict[str, str]) -> Iterator[dict[str, str]]:
+    """A throwaway database in the same container, set up like `plane` but never migrated."""
+    name = "atc_fresh"
+    with psycopg.connect(pg_urls["admin"], autocommit=True) as conn:
+        conn.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+        conn.execute(f"CREATE DATABASE {name}")
+    urls = {role: url.rsplit("/", 1)[0] + f"/{name}" for role, url in pg_urls.items()}
+    apply_plane_fixtures(urls["admin"])
+    try:
+        yield urls
+    finally:
+        with psycopg.connect(pg_urls["admin"], autocommit=True) as conn:
+            conn.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
 
 
 def _reset(admin_url: str) -> None:

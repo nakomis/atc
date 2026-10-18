@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import psycopg
@@ -9,12 +10,52 @@ from atc.settings import Settings
 
 def test_migrate_creates_atc_tables(pg_urls):
     pool = db.open_pool(pg_urls["atc"])
-    assert db.migrate(pool) == 1
-    assert db.migrate(pool) == 1  # idempotent
-    with pool.connection() as c:
-        keys = [r[0] for r in c.execute("SELECT key FROM atc.column_def ORDER BY position")]
-    pool.close()
+    try:
+        assert db.migrate(pool) == 1
+        assert db.migrate(pool) == 1  # idempotent
+        with pool.connection() as c:
+            keys = [r[0] for r in c.execute("SELECT key FROM atc.column_def ORDER BY position")]
+    finally:
+        pool.close()
     assert keys == ["backlog", "next", "in_progress"]
+
+
+def test_migrate_applies_later_migrations_in_order_once(fresh_db, tmp_path):
+    shutil.copy(db.MIGRATIONS_DIR / "001_init.sql", tmp_path / "001_init.sql")
+    pool = db.open_pool(fresh_db["atc"])
+    try:
+        assert db.migrate(pool, tmp_path) == 1
+        # Written out of order on purpose: 003 depends on 002, which depends on 001.
+        (tmp_path / "003_more.sql").write_text("INSERT INTO atc.trail (step) VALUES (3);")
+        (tmp_path / "002_trail.sql").write_text(
+            "CREATE TABLE atc.trail (n serial PRIMARY KEY, step int NOT NULL);"
+            " INSERT INTO atc.trail (step) VALUES (2);"
+        )
+        # 001 would fail on CREATE TABLE if re-run, so success also proves it is skipped.
+        assert db.migrate(pool, tmp_path) == 3
+        assert db.migrate(pool, tmp_path) == 3  # idempotent
+        with pool.connection() as c:
+            versions = [r[0] for r in c.execute("SELECT version FROM atc.schema_version ORDER BY version")]
+            steps = [r[0] for r in c.execute("SELECT step FROM atc.trail ORDER BY n")]
+    finally:
+        pool.close()
+    assert versions == [1, 2, 3]
+    assert steps == [2, 3]
+
+
+def test_failed_migration_rolls_back_and_keeps_the_version(fresh_db, tmp_path):
+    shutil.copy(db.MIGRATIONS_DIR / "001_init.sql", tmp_path / "001_init.sql")
+    (tmp_path / "002_broken.sql").write_text("CREATE TABLE atc.half (n int); SELECT no_such_function();")
+    pool = db.open_pool(fresh_db["atc"])
+    try:
+        with pytest.raises(psycopg.errors.UndefinedFunction):
+            db.migrate(pool, tmp_path)
+        with pool.connection() as c:
+            versions = [r[0] for r in c.execute("SELECT version FROM atc.schema_version")]
+            half = c.execute("SELECT to_regclass('atc.half')").fetchone()[0]
+    finally:
+        pool.close()
+    assert versions == [1] and half is None
 
 
 def test_atc_role_cannot_write_plane_tables(pg_urls, plane):
@@ -95,7 +136,8 @@ def test_plane_factory_builds_refs_and_memberships(plane):
 
 
 def test_health_is_served(client):
-    assert client.get("/api/health").status_code in (200, 503)
+    resp = client.get("/api/health")
+    assert resp.status_code == 200 and resp.json()["ok"] is True
 
 
 def test_health_is_503_when_the_database_is_unreachable(client):
