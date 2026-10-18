@@ -17,7 +17,7 @@ from uuid import UUID
 
 import psycopg
 
-from atc import ranks
+from atc import moves, ranks
 from atc.board import DEFAULT_COLUMN, unsorted_id
 from atc.plane import missing_columns, read_plane
 from atc.store import MOVE_LOCK_KEY, backlog_max_rank, load_rows
@@ -79,21 +79,32 @@ def reconcile(conn: psycopg.Connection, workspace_slug: str) -> ReconcileResult:
         for m in snap.modules:
             modules_of.setdefault(m.project_id, []).append(m)
 
+        rebalanced = False
+
+        def next_tail() -> str:
+            nonlocal tail, rebalanced
+            tail = ranks.after(tail)
+            if len(tail) > ranks.REBALANCE_LENGTH and not rebalanced:  # Backlog's bottom is long
+                moves.rebalance_column(conn, snap, DEFAULT_COLUMN)
+                rebalanced = True  # once per pass, whatever is left over
+                tail = ranks.after(backlog_max_rank(conn))
+            return tail
+
         for p in snap.projects:
             existing = rows.projects.get(p.id)
             column = existing.column_key if existing else DEFAULT_COLUMN
             if existing is None:
-                tail = ranks.after(tail)
-                created_projects += _insert_project(conn, p.id, tail)
+                created_projects += _insert_project(conn, p.id, next_tail())
             # (id, project column or Backlog): new modules are Backlog cards; Unsorted follows its project.
             wanted = [(m.id, False, DEFAULT_COLUMN) for m in modules_of.get(p.id, [])]
             wanted.append((unsorted_id(p.id), True, column))
             for module_id, unsorted, column_key in wanted:
                 if module_id in rows.modules:
                     continue
-                tail = ranks.after(tail)
                 card_tail[p.id] = card = ranks.after(card_tail.get(p.id))
-                created_modules += _insert_module(conn, module_id, p.id, unsorted, column_key, tail, card)
+                created_modules += _insert_module(
+                    conn, module_id, p.id, unsorted, column_key, next_tail(), card
+                )
     return ReconcileResult(created_projects, created_modules, hidden, unhidden, [], at)
 
 

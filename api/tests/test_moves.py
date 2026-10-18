@@ -259,6 +259,48 @@ def test_place_with_duplicate_ranks_reranks_the_lot():
     assert sorted(order, key=order.get) == ["a", "new", "b"]
 
 
+def test_ten_thousand_bottom_appends_then_a_drop_keep_ranks_short():  # final review I2
+    entries: list[tuple[int, str | None]] = []
+    for n in range(10_000):
+        rank, filled = moves.place(entries, len(entries))
+        fixed = dict(filled)
+        entries = [(k, fixed.get(k, r)) for k, r in entries] + [(n, rank)]
+    rank, filled = moves.place(entries, len(entries))  # one more drop on the column's empty space
+    fixed = dict(filled)
+    entries = [(k, fixed.get(k, r)) for k, r in entries] + [("drop", rank)]
+    rank, filled = moves.place(entries, 5_000)  # and one into the middle
+    fixed = dict(filled)
+    entries = [(k, fixed.get(k, r)) for k, r in entries]
+    entries.insert(5_000, ("middle", rank))
+    seq = [r for _, r in entries]
+    assert seq == sorted(seq) and len(set(seq)) == len(seq)
+    assert max(map(len, seq)) <= ranks.REBALANCE_LENGTH
+    assert [k for k, _ in entries][4_999:5_001] == [4_999, "middle"]
+
+
+def test_place_reranks_when_the_new_key_would_be_too_long():
+    long = "z" * ranks.REBALANCE_LENGTH
+    rank, filled = moves.place([("a", "1"), ("b", long)], 2)
+    order = dict(filled) | {"new": rank}
+    assert sorted(order, key=order.get) == ["a", "b", "new"]
+    assert max(map(len, order.values())) <= 2
+
+
+def test_drop_at_the_bottom_of_a_column_with_a_long_tail_rebalances(client, plane, pg_urls):
+    a, b, c = (plane.project(name) for name in ("AAA", "BBB", "CCC"))
+    for p in (a, b, c):
+        plane.item(p, "x", plane.state(p, "unstarted"))
+    move(client, "project", a, "next")
+    move(client, "project", b, "next")
+    with psycopg.connect(pg_urls["admin"]) as conn:  # as if after thousands of bottom drops
+        conn.execute("UPDATE atc.project SET rank = %s WHERE plane_id = %s", ("z" * 990 + "1", b))
+    board = move(client, "project", c, "next")
+    assert [card["label"] for card in board["next"]["cards"]] == ["AAA project", "BBB project", "CCC project"]
+    with psycopg.connect(pg_urls["admin"]) as conn:
+        lengths = [len(r) for (r,) in conn.execute("SELECT rank FROM atc.project WHERE column_key = 'next'")]
+    assert max(lengths) <= ranks.REBALANCE_LENGTH
+
+
 def test_place_rejects_out_of_range():
     with pytest.raises(IndexError):
         moves.place([], 1)

@@ -32,7 +32,8 @@ def place[K](entries: Sequence[tuple[K, str | None]], index: int) -> tuple[str, 
     """A rank for a new entry at `index` in `entries` (ordered, ranked ones first, rank None = rowless).
 
     Returns the new rank and `(key, rank)` for each existing entry that must be (re)ranked too:
-    the rowless entries ahead of `index`, or all of them if neighbouring ranks have collided.
+    the rowless entries ahead of `index`, or all of them if neighbouring ranks have collided or a
+    key would grow past `ranks.REBALANCE_LENGTH` (so repeated drops at one end stay cheap).
     """
     if not 0 <= index <= len(entries):
         raise IndexError(index)
@@ -41,30 +42,25 @@ def place[K](entries: Sequence[tuple[K, str | None]], index: int) -> tuple[str, 
         if index <= ranked:
             lo = entries[index - 1][1] if index else None
             hi = entries[index][1] if index < ranked else None
-            return ranks.between(lo, hi), []
-        last = entries[ranked - 1][1] if ranked else None
-        filled = []
-        for key, _ in entries[ranked:index]:
-            last = ranks.after(last)
-            filled.append((key, last))
-        return ranks.after(last), filled
+            rank, filled = ranks.between(lo, hi), []
+        else:
+            last = entries[ranked - 1][1] if ranked else None
+            filled = []
+            for key, _ in entries[ranked:index]:
+                last = ranks.after(last)
+                filled.append((key, last))
+            rank = ranks.after(last)
     except ValueError:  # two neighbours share a rank (a race); rank the whole list afresh
         return _rerank(entries, index)
+    if len(rank) > ranks.REBALANCE_LENGTH or any(len(r) > ranks.REBALANCE_LENGTH for _, r in filled):
+        return _rerank(entries, index)
+    return rank, filled
 
 
 def _rerank[K](entries: Sequence[tuple[K, str | None]], index: int) -> tuple[str, list[tuple[K, str]]]:
     keys = [k for k, _ in entries]
-    sequence: list[K | None] = [*keys[:index], None, *keys[index:]]
-    rank: str | None = None
-    new = ""
-    filled = []
-    for key in sequence:
-        rank = ranks.after(rank)
-        if key is None:
-            new = rank
-        else:
-            filled.append((key, rank))
-    return new, filled
+    fresh = ranks.spread(len(keys) + 1)
+    return fresh[index], list(zip(keys, fresh[:index] + fresh[index + 1 :], strict=True))
 
 
 class _Layout:
@@ -255,3 +251,24 @@ def backlog_rank_in_place(
     cards = layout.cards(DEFAULT_COLUMN)
     index = [c.id for c in cards].index(project_id)
     return layout.place_card(DEFAULT_COLUMN, [c for c in cards if c.id != project_id], index)
+
+
+def rebalance_column(conn: psycopg.Connection, snap: PlaneSnapshot, column_key: str) -> int:
+    """Give every ranked card in `column_key` a fresh, short, evenly spaced rank, keeping the order.
+
+    Reconcile calls this (under the move lock) when its Backlog appends would pass
+    `ranks.REBALANCE_LENGTH`. Rowless cards keep no rank: they already sort after every ranked one.
+    Modules inside a project card carry a column rank that is not in force, but Backlog's tail
+    (`store.backlog_max_rank`) reads it, so they take their card's new rank. Rows are read afresh,
+    so rows written earlier in the same transaction are included. Returns the number of cards
+    re-ranked.
+    """
+    layout = _Layout(conn, snap, store.load_rows(conn))
+    ranked = [c for c in layout.cards(column_key) if layout.column_rank(c) is not None]
+    for card, rank in zip(ranked, ranks.spread(len(ranked)), strict=True):
+        layout.write_card(card, column_key, rank)
+        if card.kind == "project":
+            for view in card.modules:
+                if view.id in layout.module_rows:
+                    layout.write_module(view, column_key, column_rank=rank)
+    return len(ranked)

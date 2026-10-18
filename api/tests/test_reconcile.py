@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from helpers import col, move
 
+from atc import ranks
 from atc import reconcile as reconcile_module
 from atc.app import MOVE_LOCK_KEY, create_app
 from atc.board import unsorted_id
@@ -30,6 +31,19 @@ def test_new_rows_sit_at_the_bottom_of_backlog_in_creation_order(atc_conn, plane
     assert rows[a] < rows[b]
     assert {r[0] for r in atc_conn.execute("SELECT column_key FROM atc.project")} == {"backlog"}
     assert {r[0] for r in atc_conn.execute("SELECT column_key FROM atc.module")} == {"backlog"}
+
+
+def test_reconcile_rebalances_a_long_backlog_tail(atc_conn, plane):  # final review I2
+    old = plane.project("OLD")
+    reconcile(atc_conn, "nakomis")
+    atc_conn.execute("UPDATE atc.project SET rank = %s WHERE plane_id = %s", ("z" * 500 + "1", old))
+    atc_conn.execute("UPDATE atc.module SET column_rank = %s", ("z" * 499 + "1",))
+    new = [plane.project(f"N{n:02}") for n in range(3)]
+    assert reconcile(atc_conn, "nakomis").created_projects == 3
+    rows = dict(atc_conn.execute("SELECT plane_id, rank FROM atc.project").fetchall())
+    module_ranks = [r for (r,) in atc_conn.execute("SELECT column_rank FROM atc.module")]
+    assert [rows[p] for p in [old, *new]] == sorted(rows[p] for p in [old, *new])
+    assert max(map(len, [*rows.values(), *module_ranks])) <= ranks.REBALANCE_LENGTH
 
 
 def test_new_module_of_a_moved_project_is_a_backlog_card(client, plane, atc_conn):
