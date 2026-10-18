@@ -79,3 +79,38 @@ def load_rows(conn: psycopg.Connection) -> AtcRows:
         for r in conn.execute("SELECT plane_id, points, points_source, updated_at FROM atc.work_item")
     }
     return AtcRows(columns=columns, projects=projects, modules=modules, points=points)
+
+
+# --- Writers. Rows are created lazily: the first move of a project or module inserts its row.
+# A write clears hidden_at: the item is live in Plane (the caller found it in the snapshot).
+
+
+def put_project_placement(conn: psycopg.Connection, plane_id: UUID, column_key: str, rank: str) -> None:
+    """Upsert a project's column and rank, leaving its metadata alone."""
+    conn.execute(
+        "INSERT INTO atc.project (plane_id, column_key, rank) VALUES (%s, %s, %s)"
+        " ON CONFLICT (plane_id) DO UPDATE SET column_key = excluded.column_key, rank = excluded.rank,"
+        " hidden_at = NULL, updated_at = now()",
+        (plane_id, column_key, rank),
+    )
+
+
+def put_module_placement(
+    conn: psycopg.Connection,
+    module_id: UUID,
+    project_id: UUID,
+    *,
+    unsorted: bool,
+    column_key: str,
+    column_rank: str,
+    card_rank: str,
+) -> None:
+    """Upsert a module's (or Unsorted group's) column and both ranks."""
+    conn.execute(
+        "INSERT INTO atc.module (id, project_id, unsorted, column_key, column_rank, card_rank)"
+        " VALUES (%s, %s, %s, %s, %s, %s)"
+        " ON CONFLICT (id) DO UPDATE SET column_key = excluded.column_key,"
+        " column_rank = excluded.column_rank, card_rank = excluded.card_rank,"
+        " hidden_at = NULL, updated_at = now()",
+        (module_id, project_id, unsorted, column_key, column_rank, card_rank),
+    )

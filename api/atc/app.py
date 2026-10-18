@@ -5,18 +5,36 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
+from uuid import UUID
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-from atc import db
+from atc import db, moves
 from atc.board import build_board
 from atc.plane import read_plane
 from atc.settings import Settings
 from atc.store import load_rows
 
 log = logging.getLogger(__name__)
+
+# Fixed for ever: concurrent drags queue on it, so each places against the board as the last left it.
+MOVE_LOCK_KEY = 0x41544301
+
+
+class MoveBody(BaseModel):
+    kind: Literal["project", "module"]
+    id: UUID
+    to_column: str
+    before_id: UUID | None = None
+
+
+class ReorderBody(BaseModel):
+    project_id: UUID
+    module_id: UUID
+    before_id: UUID | None = None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -61,5 +79,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows = load_rows(conn)
         built = build_board(snap, rows, include_all=include_all, link=link, max_points=settings.max_points)
         return built.to_json()
+
+    def write(request: Request, include_all: bool, change) -> dict:
+        """Apply `change(conn, snap, rows)` in one transaction, then return the board as it now stands."""
+        with request.app.state.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(%s)", (MOVE_LOCK_KEY,))
+                snap = read_plane(conn, settings.workspace_slug)
+                try:
+                    change(conn, snap, load_rows(conn))
+                except moves.NotFound as e:
+                    raise HTTPException(404, str(e)) from e
+                except moves.Invalid as e:
+                    raise HTTPException(422, str(e)) from e
+            rows = load_rows(conn)
+        built = build_board(snap, rows, include_all=include_all, link=link, max_points=settings.max_points)
+        return built.to_json()
+
+    # The bodies are pydantic models, so FastAPI refuses anything not sent as JSON: a cross-site
+    # form post cannot drive a move.
+    @app.post("/api/move")
+    def move(
+        body: MoveBody, request: Request, include_all: Annotated[bool, Query(alias="all")] = False
+    ) -> dict:
+        return write(
+            request,
+            include_all,
+            lambda conn, snap, rows: moves.move(
+                conn,
+                snap,
+                rows,
+                kind=body.kind,
+                id=body.id,
+                to_column=body.to_column,
+                before_id=body.before_id,
+            ),
+        )
+
+    @app.post("/api/reorder")
+    def reorder(
+        body: ReorderBody, request: Request, include_all: Annotated[bool, Query(alias="all")] = False
+    ) -> dict:
+        return write(
+            request,
+            include_all,
+            lambda conn, snap, rows: moves.reorder(
+                conn,
+                snap,
+                rows,
+                project_id=body.project_id,
+                module_id=body.module_id,
+                before_id=body.before_id,
+            ),
+        )
 
     return app
