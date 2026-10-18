@@ -81,7 +81,8 @@ def seed_project(pg_urls, plane_id, repo, **extra):
 
 
 def test_bau_projects_in_board_order_with_metadata(client, plane, pg_urls):
-    a, b, c = plane.project("AAA"), plane.project("BBB"), plane.project("CCC")
+    a, b = plane.project("AAA"), plane.project("BBB")
+    plane.project("CCC")
     for p in (a, b):
         plane.item(p, "x", plane.state(p, "unstarted"))
     seed_project(pg_urls, a, "nakomis/aaa")
