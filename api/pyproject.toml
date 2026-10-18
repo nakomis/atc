@@ -21,6 +21,9 @@ dev = [
     "testcontainers[postgres]>=4.8",
 ]
 
+[project.scripts]
+atc-points-pass = "atc.points_pass:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

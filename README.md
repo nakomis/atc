@@ -17,6 +17,7 @@ If you find this useful, please consider buying me a coffee:
 - [What it is](#what-it-is)
 - [API](#api)
   * [Reconcile and health](#reconcile-and-health)
+- [Points pass](#points-pass)
 - [Container image](#container-image)
 - [Architecture Diagram](#architecture-diagram)
 - [Repository Layout](#repository-layout)
@@ -52,6 +53,10 @@ All JSON; ATC adds no auth of its own (Leia's mTLS is the gate).
 A reconcile pass runs at start-up and then every `ATC_RECONCILE_SECONDS` (default 300; `0` turns the loop off). It gives new Plane projects, their Unsorted groups and new modules a row at the bottom of Backlog, hides ATC rows whose Plane project or module is deleted or archived, and unhides them when they return. It never deletes rows, never moves an existing row, and takes the same advisory lock as moves. A failed pass is logged and makes `/api/health` report 503 until the next one succeeds.
 
 `/api/health` is 503 when the database is unreachable, when the `atc` role cannot see a Plane column ATC reads (`missing` lists each as `table.column`; the reconcile writes nothing meanwhile), or when the last reconcile failed. `hidden` counts the ATC rows currently hidden.
+
+## Points pass
+
+`uv --directory api run atc-points-pass [--project IDENT]... [--dry-run] [--model M]` runs one `claude -p` session (Martin's Max login) per batch of 40 open, unestimated tickets in each project, and writes the answers through the API with source `claude-estimate` and `if_unestimated`, so a number already set is never overwritten (a 409 counts as skipped). Sessions run locked down (no tools, no saved session, neutral temp directory) on `--model` (default `claude-opus-5-5`); a usage limit stops the pass with a non-zero exit, as do two consecutive session failures. Ticket text goes into the prompt as nonce-delimited, untrusted data. `--atc-url`, `--cert` and `--key` default to `https://atc.plane.home.nakomis.com` and `~/.config/nakomis/client.{crt,key}`. Re-run it any time for new unestimated items; try `--dry-run` on one small project first.
 
 ## Container image
 

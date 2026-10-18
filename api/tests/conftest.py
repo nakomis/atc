@@ -114,3 +114,18 @@ def client(pg_urls: dict[str, str]) -> Iterator[TestClient]:
     app = create_app(Settings(database_url=pg_urls["atc"], reconcile_seconds=0))
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude(monkeypatch):
+    """Any test that would run the real claude CLI fails loudly instead."""
+    import subprocess
+
+    real_run = subprocess.run
+
+    def guarded(cmd, *a, **k):
+        if cmd and cmd[0] == "claude":
+            raise AssertionError("a test tried to invoke the real claude CLI")
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", guarded)
