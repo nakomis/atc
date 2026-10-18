@@ -13,6 +13,7 @@ from atc.points_pass import (
     main,
     parse_estimates,
     run_claude,
+    server_max_points,
 )
 
 
@@ -39,12 +40,15 @@ class FakeAtc:
         self.unestimated: dict[str, list[dict]] = {}
         self.already_set: set[str] = set()
         self.puts: list[tuple[str, dict]] = []
+        self.board: dict = {"max_points": 100, "columns": []}
         self.client = AtcHttp("https://atc.test", transport=httpx.MockTransport(self.handle))
 
     def handle(self, req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/api/work-items":
             assert req.url.params["unestimated"] == "true"
             return httpx.Response(200, json=self.unestimated.get(req.url.params["project"], []))
+        if req.method == "GET" and req.url.path == "/api/board":
+            return httpx.Response(200, json=self.board)
         if req.method == "GET" and req.url.path == "/api/projects":
             return httpx.Response(200, json=[{"identifier": k} for k in self.unestimated])
         m = re.fullmatch(r"/api/work-items/(.+)/points", req.url.path)
@@ -266,3 +270,28 @@ def test_real_claude_is_blocked_in_tests(fake_atc):
     fake_atc.unestimated["HOME"] = [item("HOME-1")]
     with pytest.raises(AssertionError, match="real claude CLI"):
         estimate_project(fake_atc.client, "HOME")  # default runner must never reach claude
+
+
+def test_main_honours_the_servers_max_points(fake_atc, monkeypatch):  # final review M2
+    fake_atc.unestimated["HOME"] = [item("HOME-1"), item("HOME-2")]
+    fake_atc.board["max_points"] = 250
+    prompts = []
+
+    def claude(p, model=None):
+        prompts.append(p)
+        return '{"HOME-1": 180, "HOME-2": 300}'
+
+    monkeypatch.setattr("atc.points_pass.AtcHttp", lambda *a, **k: fake_atc.client)
+    monkeypatch.setattr("atc.points_pass.run_claude", claude)
+    assert main([]) == 0
+    assert "from 1 to 250" in prompts[0]
+    assert fake_atc.puts == [
+        (ID["HOME-1"], {"points": 180, "source": "claude-estimate", "if_unestimated": True})
+    ]
+
+
+def test_server_max_points_falls_back_to_100(fake_atc):
+    fake_atc.board = {"columns": []}
+    assert server_max_points(fake_atc.client) == 100
+    fake_atc.board = {"max_points": 7}
+    assert server_max_points(fake_atc.client) == 7
