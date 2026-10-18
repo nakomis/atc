@@ -23,7 +23,7 @@ CALIBRATION = (
     "a feature with infra and tests is 3–8, anything over 20 should probably be split"
 )
 SOURCE = "claude-estimate"
-MAX_POINTS = 100
+MAX_POINTS = 100  # only a fallback: the pass asks the server (ATC_MAX_POINTS) for its maximum
 DEFAULT_MODEL = "claude-opus-5-5"
 DESCRIPTION_LIMIT = 4000
 MAX_CONSECUTIVE_FAILURES = 2
@@ -123,6 +123,12 @@ def _is_limit(text: str) -> bool:
     return any(w in t for w in _LIMIT_WORDS)
 
 
+def server_max_points(atc: AtcHttp) -> int:
+    """The server's points maximum (`max_points` on GET /api/board, set by ATC_MAX_POINTS)."""
+    value = atc.get("/api/board").get("max_points")
+    return value if type(value) is int and value >= 1 else MAX_POINTS
+
+
 def estimate_project(
     atc: AtcHttp,
     identifier: str,
@@ -190,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     atc = AtcHttp(args.atc_url, args.cert, args.key)
+    max_points = server_max_points(atc)
     if args.project:
         idents = args.project
     else:
@@ -201,7 +208,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             r = estimate_project(
-                atc, ident, run=lambda p: run_claude(p, args.model), dry_run=args.dry_run, log=print
+                atc,
+                ident,
+                run=lambda p: run_claude(p, args.model),
+                dry_run=args.dry_run,
+                max_points=max_points,
+                log=print,
             )
         except ClaudeLimitError as e:
             print(f"{ident}: Claude usage limit reached, stopping: {e}")

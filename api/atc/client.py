@@ -32,6 +32,15 @@ class AtcHttp:
         r.raise_for_status()
         return r.json()
 
+    def get_status(self, path: str) -> tuple[int, Any]:
+        """GET returning (status, json) without raising, so callers can handle 404."""
+        r = self._http.get(path)
+        try:
+            data = r.json()
+        except ValueError:
+            data = r.text
+        return r.status_code, data
+
     def put(self, path: str, body: dict[str, Any]) -> tuple[int, Any]:
         """Return (status, json) without raising, so callers can handle 409."""
         r = self._http.put(path, json=body)

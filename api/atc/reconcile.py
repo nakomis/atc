@@ -11,16 +11,19 @@ Every write happens under the same advisory lock as moves and metadata writes, s
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
 import psycopg
 
-from atc import ranks
+from atc import moves, ranks
 from atc.board import DEFAULT_COLUMN, unsorted_id
 from atc.plane import missing_columns, read_plane
 from atc.store import MOVE_LOCK_KEY, backlog_max_rank, load_rows
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,64 +39,90 @@ class ReconcileResult:
 def reconcile(conn: psycopg.Connection, workspace_slug: str) -> ReconcileResult:
     """One reconcile pass in a single REPEATABLE READ transaction; LookupError if the workspace is unseen.
 
+    The move lock is taken first, as a session-level lock in its own short transaction, and only
+    then does the REPEATABLE READ transaction (and its snapshot) begin. Every other writer takes the
+    same lock, so nothing can commit between the snapshot and reconcile's writes, and a pass that
+    waited for a busy board does not fail with a serialisation conflict.
+
     If any required Plane column is invisible to the `atc` role nothing is written and `missing`
     says which; the caller reports it through /api/health.
     """
     at = datetime.now(UTC)
     with conn.transaction():
-        # One snapshot for every read below, so projects, modules and ATC's rows agree. It must be
-        # set before the first query. The snapshot may predate a wait on the lock; that is safe
-        # because the inserts are ON CONFLICT DO NOTHING and the next pass corrects any hide that
-        # raced a Plane change.
-        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MOVE_LOCK_KEY,))
-        missing = missing_columns(conn)
-        if missing:
-            return ReconcileResult(0, 0, 0, 0, missing, at)
-        # An unreadable or misnamed workspace would look like "everything is gone"; refuse to hide on it.
-        if (
-            conn.execute(
-                "SELECT 1 FROM public.workspaces WHERE slug = %s AND deleted_at IS NULL", (workspace_slug,)
-            ).fetchone()
-            is None
-        ):
-            raise LookupError(f"workspace {workspace_slug!r} not found in Plane")
-        snap = read_plane(conn, workspace_slug)
+        conn.execute("SELECT pg_advisory_lock(%s)", (MOVE_LOCK_KEY,))
+    try:
+        with conn.transaction():
+            # One snapshot for every read below, so projects, modules and ATC's rows agree.
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            return _pass(conn, workspace_slug, at)
+    finally:
+        try:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_unlock(%s)", (MOVE_LOCK_KEY,))
+        except psycopg.Error:
+            # A session that cannot unlock must not go back to the pool holding the lock.
+            log.exception("reconcile could not release the move lock; closing its connection")
+            conn.close()
 
-        live_projects = [p.id for p in snap.projects]
-        live_modules = [m.id for m in snap.modules] + [unsorted_id(p) for p in live_projects]
-        hidden = _flip(conn, "atc.project", "plane_id", live_projects, hide=True)
-        hidden += _flip(conn, "atc.module", "id", live_modules, hide=True)
-        unhidden = _flip(conn, "atc.project", "plane_id", live_projects, hide=False)
-        unhidden += _flip(conn, "atc.module", "id", live_modules, hide=False)
 
-        rows = load_rows(conn)
-        tail = backlog_max_rank(conn)  # the last rank handed out in Backlog, advanced as we insert
-        card_tail: dict[UUID, str | None] = {}
-        for r in rows.modules.values():
-            if r.hidden_at is None and (card_tail.get(r.project_id) or "") < r.card_rank:
-                card_tail[r.project_id] = r.card_rank
+def _pass(conn: psycopg.Connection, workspace_slug: str, at: datetime) -> ReconcileResult:
+    """The body of a pass: runs inside reconcile's transaction, with the move lock held."""
+    missing = missing_columns(conn)
+    if missing:
+        return ReconcileResult(0, 0, 0, 0, missing, at)
+    # An unreadable or misnamed workspace would look like "everything is gone"; refuse to hide on it.
+    if (
+        conn.execute(
+            "SELECT 1 FROM public.workspaces WHERE slug = %s AND deleted_at IS NULL", (workspace_slug,)
+        ).fetchone()
+        is None
+    ):
+        raise LookupError(f"workspace {workspace_slug!r} not found in Plane")
+    snap = read_plane(conn, workspace_slug)
 
-        created_projects = created_modules = 0
-        modules_of: dict[UUID, list] = {}
-        for m in snap.modules:
-            modules_of.setdefault(m.project_id, []).append(m)
+    live_projects = [p.id for p in snap.projects]
+    live_modules = [m.id for m in snap.modules] + [unsorted_id(p) for p in live_projects]
+    hidden = _flip(conn, "atc.project", "plane_id", live_projects, hide=True)
+    hidden += _flip(conn, "atc.module", "id", live_modules, hide=True)
+    unhidden = _flip(conn, "atc.project", "plane_id", live_projects, hide=False)
+    unhidden += _flip(conn, "atc.module", "id", live_modules, hide=False)
 
-        for p in snap.projects:
-            existing = rows.projects.get(p.id)
-            column = existing.column_key if existing else DEFAULT_COLUMN
-            if existing is None:
-                tail = ranks.after(tail)
-                created_projects += _insert_project(conn, p.id, tail)
-            # (id, project column or Backlog): new modules are Backlog cards; Unsorted follows its project.
-            wanted = [(m.id, False, DEFAULT_COLUMN) for m in modules_of.get(p.id, [])]
-            wanted.append((unsorted_id(p.id), True, column))
-            for module_id, unsorted, column_key in wanted:
-                if module_id in rows.modules:
-                    continue
-                tail = ranks.after(tail)
-                card_tail[p.id] = card = ranks.after(card_tail.get(p.id))
-                created_modules += _insert_module(conn, module_id, p.id, unsorted, column_key, tail, card)
+    rows = load_rows(conn)
+    tail = backlog_max_rank(conn)  # the last rank handed out in Backlog, advanced as we insert
+    card_tail: dict[UUID, str | None] = {}
+    for r in rows.modules.values():
+        if r.hidden_at is None and (card_tail.get(r.project_id) or "") < r.card_rank:
+            card_tail[r.project_id] = r.card_rank
+
+    created_projects = created_modules = 0
+    modules_of: dict[UUID, list] = {}
+    for m in snap.modules:
+        modules_of.setdefault(m.project_id, []).append(m)
+
+    rebalanced = False
+
+    def next_tail() -> str:
+        nonlocal tail, rebalanced
+        tail = ranks.after(tail)
+        if len(tail) > ranks.REBALANCE_LENGTH and not rebalanced:  # Backlog's bottom is long
+            moves.rebalance_column(conn, snap, DEFAULT_COLUMN)
+            rebalanced = True  # once per pass, whatever is left over
+            tail = ranks.after(backlog_max_rank(conn))
+        return tail
+
+    for p in snap.projects:
+        existing = rows.projects.get(p.id)
+        column = existing.column_key if existing else DEFAULT_COLUMN
+        if existing is None:
+            created_projects += _insert_project(conn, p.id, next_tail())
+        # (id, project column or Backlog): new modules are Backlog cards; Unsorted follows its project.
+        wanted = [(m.id, False, DEFAULT_COLUMN) for m in modules_of.get(p.id, [])]
+        wanted.append((unsorted_id(p.id), True, column))
+        for module_id, unsorted, column_key in wanted:
+            if module_id in rows.modules:
+                continue
+            card_tail[p.id] = card = ranks.after(card_tail.get(p.id))
+            created_modules += _insert_module(conn, module_id, p.id, unsorted, column_key, next_tail(), card)
     return ReconcileResult(created_projects, created_modules, hidden, unhidden, [], at)
 
 

@@ -2,7 +2,7 @@ import random
 
 import pytest
 
-from atc.ranks import after, between
+from atc.ranks import after, between, spread
 
 
 def test_between_open_ends():
@@ -65,3 +65,33 @@ def test_random_insertions_stay_ordered():
 def test_between_rejects_upper_bound_ending_in_zero():
     with pytest.raises(ValueError):
         between("a", "b0")
+
+
+def test_ten_thousand_appends_stay_ordered_and_short():  # final review I2
+    keys = [after(None)]
+    for _ in range(10_000):
+        keys.append(after(keys[-1]))
+    assert keys == sorted(keys) and len(set(keys)) == len(keys)
+    assert not any(k.endswith("0") for k in keys)
+    assert max(map(len, keys)) <= 10_000 // 61 + 2  # one digit per 61 appends, not per six
+
+
+def test_after_shortens_a_long_key():
+    assert after("a5Qzz") == "b"
+    assert after("zzz") == "zzz1"
+
+
+def test_deep_keys_need_no_recursion():
+    deep = "V" + "z" * 5000
+    k = between(deep, "W")
+    assert deep < k < "W"
+    assert "V" < between("V", "V" + "0" * 4000 + "1") < "V" + "0" * 4000 + "1"
+    assert after("z" * 5000) > "z" * 5000
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 61, 62, 500, 3844, 5000])
+def test_spread_is_ordered_unique_and_short(n):
+    keys = spread(n)
+    assert len(keys) == n and keys == sorted(keys) and len(set(keys)) == n
+    assert all(k and not k.endswith("0") for k in keys)
+    assert all(len(k) <= 3 for k in keys)
