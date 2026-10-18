@@ -184,3 +184,76 @@ def test_failed_reconcile_is_recorded_not_fatal(pg_urls, plane, monkeypatch):
             time.sleep(0.1)
         assert resp.status_code == 503 and resp.json()["missing"] == []
         assert c.get("/api/board").status_code == 200
+
+
+def test_reconcile_snapshot_follows_the_lock_so_a_waiting_pass_does_not_conflict(atc_conn, plane, pg_urls):
+    # Final review I3: the snapshot used to be taken before the wait, so a write committed while
+    # reconcile waited made its hide fail with "could not serialize access".
+    p = plane.project("HOME")
+    reconcile(atc_conn, "nakomis")
+    plane.archive_project(p)
+    outcome: list = []
+
+    def run():
+        try:
+            outcome.append(reconcile(atc_conn, "nakomis"))
+        except Exception as e:  # noqa: BLE001 - reported by the assertion below
+            outcome.append(e)
+
+    with psycopg.connect(pg_urls["atc"]) as holder:
+        holder.execute("SELECT pg_advisory_xact_lock(%s)", (MOVE_LOCK_KEY,))
+        t = threading.Thread(target=run)
+        t.start()
+        time.sleep(0.5)  # reconcile is now waiting for the lock
+        holder.execute("UPDATE atc.project SET updated_at = now() WHERE plane_id = %s", (p,))
+        holder.commit()
+    t.join(10)
+    assert len(outcome) == 1 and not isinstance(outcome[0], Exception), outcome
+    assert outcome[0].hidden == 2  # the project and its Unsorted group
+    with psycopg.connect(pg_urls["atc"]) as c:  # and the session lock was released
+        assert c.execute("SELECT pg_try_advisory_lock(%s)", (MOVE_LOCK_KEY,)).fetchone() == (True,)
+
+
+def _serialisation_failure() -> psycopg.errors.SerializationFailure:
+    return psycopg.errors.SerializationFailure("could not serialize access due to concurrent update")
+
+
+def test_a_retried_serialisation_conflict_keeps_health_green(pg_urls, plane, monkeypatch):
+    plane.project("HOME")
+    real = reconcile_module.reconcile
+    calls = []
+
+    def flaky(conn, slug):
+        calls.append(slug)
+        if len(calls) == 1:
+            raise _serialisation_failure()
+        return real(conn, slug)
+
+    monkeypatch.setattr(reconcile_module, "reconcile", flaky)
+    app = create_app(Settings(database_url=pg_urls["atc"], reconcile_seconds=3600))
+    with TestClient(app) as c:
+        for _ in range(100):
+            body = c.get("/api/health").json()
+            if body["last_reconcile"]:
+                break
+            time.sleep(0.1)
+        assert body["ok"] is True and body["last_reconcile"] and len(calls) == 2
+
+
+def test_persistent_serialisation_conflicts_do_not_mark_health_503(pg_urls, plane, monkeypatch):
+    calls = []
+
+    def always(conn, slug):
+        calls.append(slug)
+        raise _serialisation_failure()
+
+    monkeypatch.setattr(reconcile_module, "reconcile", always)
+    app = create_app(Settings(database_url=pg_urls["atc"], reconcile_seconds=3600))
+    with TestClient(app) as c:
+        for _ in range(100):
+            if len(calls) >= 3:
+                break
+            time.sleep(0.1)
+        time.sleep(0.1)
+        resp = c.get("/api/health")
+        assert len(calls) == 3 and resp.status_code == 200 and resp.json()["last_reconcile"] is None

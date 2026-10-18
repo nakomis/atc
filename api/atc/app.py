@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
+import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -42,6 +43,7 @@ class ReorderBody(BaseModel):
 
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 DESCRIPTION_LIMIT = 2000
+RECONCILE_ATTEMPTS = 3  # a serialisation conflict is retried this many times in a row
 
 
 class PointsBody(BaseModel):
@@ -89,10 +91,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     state = ReconcileState()
 
     def reconcile_once(pool) -> None:
-        """One pass; a failure is logged and recorded, never raised."""
+        """One pass; a failure is logged and recorded, never raised.
+
+        A serialisation conflict is an expected, harmless outcome of a busy board: the pass is
+        retried at once, and if it still conflicts it is left for the next one without marking
+        the service unhealthy.
+        """
         try:
-            with pool.connection() as conn:
-                result = reconciler.reconcile(conn, settings.workspace_slug)
+            for attempt in range(1, RECONCILE_ATTEMPTS + 1):
+                try:
+                    with pool.connection() as conn:
+                        result = reconciler.reconcile(conn, settings.workspace_slug)
+                    break
+                except psycopg.errors.SerializationFailure:
+                    log.warning("reconcile hit a serialisation conflict (attempt %s)", attempt)
+            else:
+                log.warning("reconcile still conflicting; leaving it for the next pass")
+                return
             state.last_ok, state.failed = result.at, False
             if result.missing:
                 log.error("reconcile skipped: Plane columns not visible to atc: %s", result.missing)
