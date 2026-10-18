@@ -69,7 +69,12 @@ def projects_in_priority(board: Board, snap: PlaneSnapshot, rows: AtcRows) -> li
 
 
 def project_meta(board_projects, rows: AtcRows, project_id: UUID, columns: set[str]) -> dict:
-    """ProjectMeta for one project; a missing or hidden ATC row means Backlog with no metadata."""
+    """ProjectMeta for one project.
+
+    One rule for every field: a hidden ATC row is no row. A missing or hidden row means Backlog with
+    default metadata (no repo, no deploys, BAU off), matching how the board treats it, so a project
+    that reappears in Plane never resurrects stale metadata.
+    """
     project = board_projects[project_id]
     row = rows.projects.get(project_id)
     live = row if row is not None and row.hidden_at is None else None
@@ -79,8 +84,8 @@ def project_meta(board_projects, rows: AtcRows, project_id: UUID, columns: set[s
         "identifier": project.identifier,
         "name": project.name,
         "column": column,
-        "repo": row.repo if row else None,
-        "deploys": row.deploys if row else False,
-        "deploy_action": row.deploy_action if row else "",
-        "bau_enabled": row.bau_enabled if row else False,
+        "repo": live.repo if live else None,
+        "deploys": live.deploys if live else False,
+        "deploy_action": live.deploy_action if live else "",
+        "bau_enabled": live.bau_enabled if live else False,
     }
