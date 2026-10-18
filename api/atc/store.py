@@ -174,7 +174,8 @@ def update_project_meta(
     """Merge `fields` (repo, deploys, deploy_action, bau_enabled) into a project's row.
 
     A missing row is created in Backlog at `rank` (default: after every ranked Backlog card). A hidden
-    row is revived from defaults: hidden means no row, so its stale metadata must not come back.
+    row (its project is live again but reconcile has not run) is unhidden with its column, rank and
+    metadata kept, exactly as reconcile would restore it; `fields` are then applied on top.
     """
     unknown = set(fields) - {"repo", "deploys", "deploy_action", "bau_enabled"}
     if unknown:
@@ -184,7 +185,7 @@ def update_project_meta(
         " FROM atc.project WHERE plane_id = %s FOR UPDATE",
         (project_id,),
     ).fetchone()
-    if current is None or current[6] is not None:
+    if current is None:
         merged = {"column_key": "backlog", "rank": rank or _backlog_bottom_rank(conn), "repo": None,
                   "deploys": False, "deploy_action": "", "bau_enabled": False}  # fmt: skip
     else:

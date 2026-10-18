@@ -156,7 +156,7 @@ def test_project_meta_write_keeps_a_rowless_project_where_it_was(client, plane):
     assert after == before
 
 
-def test_hidden_row_is_no_row_for_every_field(client, plane, pg_urls):
+def test_hidden_row_reads_as_no_row_and_put_unhides_keeping_metadata(client, plane, pg_urls):
     pid = plane.project("HOME")
     plane.item(pid, "x", plane.state(pid, "unstarted"))
     client.put(f"/api/projects/{pid}", json={"repo": "nakomis/home", "bau_enabled": True, "deploys": True})
@@ -166,9 +166,15 @@ def test_hidden_row_is_no_row_for_every_field(client, plane, pg_urls):
     got = client.get(f"/api/projects/{pid}").json()
     assert (got["column"], got["repo"], got["deploys"], got["bau_enabled"]) == ("backlog", None, False, False)
     assert client.get("/api/projects?bau_enabled=true").json() == []
-    # Writing revives the row from defaults, not from the stale hidden metadata.
+    # Writing unhides the row and keeps its column and metadata, as reconcile would.
     r = client.put(f"/api/projects/{pid}", json={"deploy_action": "go"}).json()
-    assert (r["repo"], r["deploys"], r["bau_enabled"], r["deploy_action"]) == (None, False, False, "go")
+    assert (r["column"], r["repo"], r["deploys"], r["bau_enabled"], r["deploy_action"]) == (
+        "next",
+        "nakomis/home",
+        True,
+        True,
+        "go",
+    )
 
 
 def test_unestimated_list(client, plane):

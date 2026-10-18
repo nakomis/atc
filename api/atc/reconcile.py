@@ -34,13 +34,18 @@ class ReconcileResult:
 
 
 def reconcile(conn: psycopg.Connection, workspace_slug: str) -> ReconcileResult:
-    """One reconcile pass in a single transaction. Raises LookupError if the workspace is not visible.
+    """One reconcile pass in a single REPEATABLE READ transaction; LookupError if the workspace is unseen.
 
     If any required Plane column is invisible to the `atc` role nothing is written and `missing`
     says which; the caller reports it through /api/health.
     """
     at = datetime.now(UTC)
     with conn.transaction():
+        # One snapshot for every read below, so projects, modules and ATC's rows agree. It must be
+        # set before the first query. The snapshot may predate a wait on the lock; that is safe
+        # because the inserts are ON CONFLICT DO NOTHING and the next pass corrects any hide that
+        # raced a Plane change.
+        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MOVE_LOCK_KEY,))
         missing = missing_columns(conn)
         if missing:

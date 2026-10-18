@@ -236,7 +236,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 rows = load_rows(conn)
                 row = rows.projects.get(pid)
                 rank = None
-                if row is None or row.hidden_at is not None:  # rowless: keep its place in Backlog
+                if row is None:  # rowless: keep its place in Backlog
                     rank = moves.backlog_rank_in_place(conn, snap, rows, pid)
                 store.update_project_meta(conn, pid, rank=rank, **fields)
         return meta_of(request, str(pid))
