@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from atc import db, moves
+from atc import db, moves, ordering
 from atc.board import build_board
 from atc.plane import read_plane
 from atc.settings import Settings
@@ -79,6 +79,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows = load_rows(conn)
         built = build_board(snap, rows, include_all=include_all, link=link, max_points=settings.max_points)
         return built.to_json()
+
+    def read_board(request: Request):
+        """One read-only snapshot, laid out as the default board (open work only)."""
+        with request.app.state.pool.connection() as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            snap = read_plane(conn, settings.workspace_slug)
+            rows = load_rows(conn)
+        built = build_board(snap, rows, include_all=False, link=link, max_points=settings.max_points)
+        return built, snap, rows
+
+    @app.get("/api/next")
+    def next_up(request: Request) -> dict:
+        built, _, _ = read_board(request)
+        column, found = ordering.next_items(built)
+        return {
+            "column": column,
+            "next": found[0] if found else None,
+            "runners_up": found[1:],
+        }
+
+    @app.get("/api/priority")
+    def priority(request: Request) -> dict:
+        built, _, _ = read_board(request)
+        return {"refs": ordering.priority_refs(built)}
+
+    @app.get("/api/projects")
+    def projects(request: Request, bau_enabled: bool | None = None) -> list[dict]:
+        built, snap, rows = read_board(request)
+        columns = {c.key for c in rows.columns}
+        metas = [
+            ordering.project_meta(built.projects, rows, pid, columns)
+            for pid in ordering.projects_in_priority(built, snap, rows)
+        ]
+        if bau_enabled is not None:
+            metas = [m for m in metas if m["bau_enabled"] == bau_enabled]
+        return metas
 
     def write(request: Request, include_all: bool, change) -> dict:
         """Apply `change(conn, snap, rows)` in one transaction, then return the board as it now stands."""
