@@ -15,7 +15,7 @@ from uuid import UUID
 import psycopg
 
 from atc import ranks, store
-from atc.board import Board, Card, ModuleView, build_board, priority_modules
+from atc.board import DEFAULT_COLUMN, Board, Card, ModuleView, build_board, priority_modules
 from atc.plane import PlaneSnapshot
 from atc.store import AtcRows
 
@@ -240,3 +240,18 @@ def reorder(
         raise Invalid(f"{before_id} is not another module in the card")
     rank = layout.place_in_card(column_key, others, _index([m.id for m in others], before_id))
     layout.write_module(layout.modules[module_id], column_key, card_rank=rank)
+
+
+def backlog_rank_in_place(
+    conn: psycopg.Connection, snap: PlaneSnapshot, rows: AtcRows, project_id: UUID
+) -> str:
+    """Rank that keeps a rowless project's card exactly where it sits in Backlog now.
+
+    Rowless cards sort after ranked ones, so those ahead of it are given ranks first (lazy rows).
+    """
+    layout = _Layout(conn, snap, rows)
+    if project_id not in layout.project_cards:
+        raise NotFound(f"no project {project_id}")
+    cards = layout.cards(DEFAULT_COLUMN)
+    index = [c.id for c in cards].index(project_id)
+    return layout.place_card(DEFAULT_COLUMN, [c for c in cards if c.id != project_id], index)
