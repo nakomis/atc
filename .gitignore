@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Planning
+PLAN.md
+
+# Coverage
+coverage/
+lcov.info
+
+# Node / web
+node_modules/
+web/dist/
+
+# Python
+.venv/
